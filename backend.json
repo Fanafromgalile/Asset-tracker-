@@ -1,0 +1,1139 @@
+
+/** @OnlyCurrentDoc */
+
+const USER_HEADERS = [
+  "Email", "Full Name", "Role", "Password Salt", "Password Hash", "Created At", "Last Login"
+];
+
+const ASSET_HEADERS = [
+  "Asset ID", "Assigned User", "Status", "Lat", "Lng", "Place Name",
+  "Last Updated", "Location Method", "Accuracy (m)", "IP Address",
+  "Serial Number", "Model", "Wi-Fi SSID", "Battery (%)", "Windows User",
+  "Enrolled Email", "Token Status"
+];
+
+const HISTORY_HEADERS = [
+  "Timestamp", "Asset ID", "Lat", "Lng", "Place Name",
+  "Location Method", "Accuracy (m)", "IP Address", "Wi-Fi SSID", "Battery (%)"
+];
+
+const DEVICE_HEADERS = [
+  "Asset ID", "Token Hash", "Enrolled Email", "Token Status", "Created At", "Last Used"
+];
+
+const OFFICE_HEADERS = [
+  "Branch ID", "Branch Name", "Lat", "Lng", "Radius (m)", "Place Name"
+];
+
+const AUDIT_HEADERS = [
+  "Timestamp", "Admin", "Action", "Target", "Details"
+];
+
+function sanitizeCell_(val) {
+  if (val === null || val === undefined) return "";
+  if (typeof val === "number" || typeof val === "boolean" || val instanceof Date) return val;
+  let str = String(val).replace(/[\r\n\t]+/g, " ").trim();
+  if (/^[=+\-@]/.test(str)) {
+    str = "'" + str;
+  }
+  return str;
+}
+
+function sha256Hex_(input) {
+  const rawBytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, input, Utilities.Charset.UTF_8);
+  return rawBytes.map(b => {
+    const v = b < 0 ? b + 256 : b;
+    return ("0" + v.toString(16)).slice(-2);
+  }).join("");
+}
+
+function getSettingsMap_(ss) {
+  const sheet = ensureSettingsSheet_(ss);
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return {};
+  const data = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+  const map = {};
+  for (let i = 0; i < data.length; i++) {
+    const k = String(data[i][0] || "").trim();
+    if (k) map[k] = data[i][1];
+  }
+  return map;
+}
+
+function setSettingKey_(ss, key, value) {
+  const sheet = ensureSettingsSheet_(ss);
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    const data = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (let i = 0; i < data.length; i++) {
+      if (String(data[i][0]).trim() === key) {
+        sheet.getRange(i + 2, 2).setValue(value);
+        return;
+      }
+    }
+  }
+  sheet.appendRow([key, value]);
+}
+
+function isDomainAllowed_(ss, email) {
+  const sMap = getSettingsMap_(ss);
+  const raw = String(sMap["Allowed Domains"] || "").trim();
+  if (!raw) return true;
+  const domains = raw.split(",").map(d => d.trim().toLowerCase()).filter(Boolean);
+  if (!domains.length) return true;
+  const domain = email.split("@")[1] || "";
+  return domains.includes(domain.toLowerCase());
+}
+
+function logAudit_(ss, actor, action, target, details) {
+  try {
+    const auditSheet = ensureAuditSheet_(ss);
+    auditSheet.appendRow([
+      new Date(),
+      sanitizeCell_(actor),
+      sanitizeCell_(action),
+      sanitizeCell_(target),
+      sanitizeCell_(details)
+    ]);
+  } catch (e) {}
+}
+
+/* ============================================================================
+   SHEET INITIALIZATION
+   ============================================================================ */
+
+function setupSheets_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  ensureUsersSheet_(ss);
+
+  let assetsSheet = ss.getSheetByName("Assets");
+  if (!assetsSheet) {
+    const firstSheet = ss.getSheets()[0];
+    if (firstSheet && firstSheet.getLastRow() === 0) {
+      firstSheet.setName("Assets");
+      assetsSheet = firstSheet;
+    } else {
+      assetsSheet = ss.insertSheet("Assets");
+    }
+  }
+  assetsSheet.getRange(1, 1, 1, ASSET_HEADERS.length).setValues([ASSET_HEADERS]).setFontWeight("bold");
+  assetsSheet.setFrozenRows(1);
+
+  let historySheet = ss.getSheetByName("History");
+  if (!historySheet) historySheet = ss.insertSheet("History");
+  historySheet.getRange(1, 1, 1, HISTORY_HEADERS.length).setValues([HISTORY_HEADERS]).setFontWeight("bold");
+  historySheet.setFrozenRows(1);
+
+  let devSheet = ss.getSheetByName("Authorized_Devices");
+  if (!devSheet) devSheet = ss.insertSheet("Authorized_Devices");
+  devSheet.getRange(1, 1, 1, DEVICE_HEADERS.length).setValues([DEVICE_HEADERS]).setFontWeight("bold");
+  devSheet.setFrozenRows(1);
+
+  ensureOfficesSheet_(ss);
+  ensureAuditSheet_(ss);
+  ensureSettingsSheet_(ss);
+
+  MailApp.getRemainingDailyQuota();
+}
+
+function ensureUsersSheet_(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName("Users");
+  if (!sheet) {
+    sheet = ss.insertSheet("Users");
+    sheet.getRange(1, 1, 1, USER_HEADERS.length).setValues([USER_HEADERS]).setFontWeight("bold");
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function ensureOfficesSheet_(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName("Offices");
+  if (!sheet) {
+    sheet = ss.insertSheet("Offices");
+    sheet.getRange(1, 1, 1, OFFICE_HEADERS.length).setValues([OFFICE_HEADERS]).setFontWeight("bold");
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function ensureAuditSheet_(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName("Audit_Log");
+  if (!sheet) {
+    sheet = ss.insertSheet("Audit_Log");
+    sheet.getRange(1, 1, 1, AUDIT_HEADERS.length).setValues([AUDIT_HEADERS]).setFontWeight("bold");
+    sheet.setFrozenRows(1);
+  }
+  return sheet;
+}
+
+function ensureSettingsSheet_(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let settingsSheet = ss.getSheetByName("Settings");
+  if (!settingsSheet) {
+    settingsSheet = ss.insertSheet("Settings");
+    settingsSheet.getRange(1, 1, 6, 2).setValues([
+      ["Setting", "Value"],
+      ["Alert Emails", ""],
+      ["Geofence Alerts", "ON"],
+      ["Enrollment URL", ""],
+      ["Allow Self Signup", "ON"],
+      ["Allowed Domains", ""]
+    ]);
+    settingsSheet.getRange(1, 1, 1, 2).setFontWeight("bold");
+    settingsSheet.setFrozenRows(1);
+  }
+  return settingsSheet;
+}
+
+/* ============================================================================
+   ACCOUNT AUTHENTICATION, SESSIONS & PASSWORD RESET
+   ============================================================================ */
+
+function authEpochKey_(email) {
+  return "AUTH_EPOCH_" + sha256Hex_(String(email || "").trim().toLowerCase()).slice(0, 32);
+}
+
+function currentUserRecord_(email) {
+  const sheet = ensureUsersSheet_(SpreadsheetApp.getActiveSpreadsheet());
+  if (sheet.getLastRow() < 2) return null;
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 7).getValues();
+  const wanted = String(email || "").trim().toLowerCase();
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0] || "").trim().toLowerCase() === wanted) {
+      return { email: wanted, name: String(rows[i][1] || wanted), role: String(rows[i][2] || "User") };
+    }
+  }
+  return null;
+}
+
+function issueUserSession_(userObj) {
+  // Internal helper only: Apps Script client calls cannot invoke names ending in underscore.
+  const token = Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
+  const expiry = Date.now() + (8 * 60 * 60 * 1000);
+  const epoch = Number(PropertiesService.getScriptProperties().getProperty(authEpochKey_(userObj.email)) || 0);
+  const record = { email: userObj.email, name: userObj.name, role: userObj.role, exp: expiry, epoch: epoch };
+  const raw = JSON.stringify(record);
+  CacheService.getScriptCache().put("sess_" + token, raw, 21600);
+  PropertiesService.getScriptProperties().setProperty("SESS_" + sha256Hex_(token).slice(0, 24), raw);
+  return token;
+}
+
+function verifyUserSession_(sessionToken, requireAdmin) {
+  const token = String(sessionToken || "").trim();
+  if (!/^[a-f0-9]{64}$/i.test(token)) throw new Error("AUTH_REQUIRED");
+  const propKey = "SESS_" + sha256Hex_(token).slice(0, 24);
+  const propRaw = PropertiesService.getScriptProperties().getProperty(propKey);
+  if (!propRaw) throw new Error("AUTH_REQUIRED");
+  let session;
+  try { session = JSON.parse(propRaw); } catch (_) { throw new Error("AUTH_REQUIRED"); }
+  if (!session || !session.exp || Date.now() > Number(session.exp)) {
+    PropertiesService.getScriptProperties().deleteProperty(propKey);
+    CacheService.getScriptCache().remove("sess_" + token);
+    throw new Error("AUTH_REQUIRED");
+  }
+  const current = currentUserRecord_(session.email);
+  const epoch = Number(PropertiesService.getScriptProperties().getProperty(authEpochKey_(session.email)) || 0);
+  if (!current || current.role === "Disabled" || epoch !== Number(session.epoch || 0)) {
+    PropertiesService.getScriptProperties().deleteProperty(propKey);
+    CacheService.getScriptCache().remove("sess_" + token);
+    throw new Error("AUTH_REQUIRED");
+  }
+  // Always use the current database role, never the role captured at login.
+  if (requireAdmin && current.role !== "Admin") throw new Error("FORBIDDEN");
+  return current;
+}
+
+function revokeUserSessions_(email) {
+  const key = authEpochKey_(email);
+  const props = PropertiesService.getScriptProperties();
+  const next = Number(props.getProperty(key) || 0) + 1;
+  props.setProperty(key, String(next));
+}
+
+function logoutSession(sessionToken) {
+  const user = verifyUserSession_(sessionToken, false);
+  revokeUserSessions_(user.email);
+  const token = String(sessionToken || "").trim();
+  PropertiesService.getScriptProperties().deleteProperty("SESS_" + sha256Hex_(token).slice(0, 24));
+  CacheService.getScriptCache().remove("sess_" + token);
+  return { success: true };
+}
+
+function registerAccount(email, fullName, password) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const cleanEmail = String(email || "").trim().toLowerCase();
+    const cleanName = sanitizeCell_(fullName || cleanEmail.split("@")[0]);
+    const cleanPass = String(password || "");
+
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return { success: false, message: "Enter a valid email address." };
+    }
+    if (cleanPass.length < 12) {
+      return { success: false, message: "Password must be at least 12 characters." };
+    }
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const usersSheet = ensureUsersSheet_(ss);
+    const lastRow = usersSheet.getLastRow();
+
+    let hasAnyAdmin = false;
+    if (lastRow >= 2) {
+      const existing = usersSheet.getRange(2, 1, lastRow - 1, 3).getValues();
+      for (let i = 0; i < existing.length; i++) {
+        if (String(existing[i][0]).trim().toLowerCase() === cleanEmail) {
+          return { success: false, message: "Account already exists. Please sign in." };
+        }
+        if (String(existing[i][2]).trim() === "Admin") {
+          hasAnyAdmin = true;
+        }
+      }
+    }
+
+    const settings = getSettingsMap_(ss);
+    const bootstrapEmail = String(PropertiesService.getScriptProperties().getProperty("BOOTSTRAP_ADMIN_EMAIL") || "").trim().toLowerCase();
+    let assignedRole = "User";
+    if (!hasAnyAdmin) {
+      // Initial administrator is provisioned only for the owner-configured address.
+      if (!bootstrapEmail || cleanEmail !== bootstrapEmail) {
+        return { success: false, message: "Administrator setup is not enabled. Contact the system owner." };
+      }
+      assignedRole = "Admin";
+    } else {
+      if (String(settings["Allow Self Signup"] || "ON").toUpperCase() === "OFF") {
+        return { success: false, message: "Self-registration is currently disabled by the Administrator." };
+      }
+      if (!isDomainAllowed_(ss, cleanEmail)) {
+        return { success: false, message: "Email domain is not in the organization's allowed list." };
+      }
+    }
+    const salt = Utilities.getUuid().replace(/-/g, "");
+    const hash = sha256Hex_(salt + ":" + cleanPass);
+    const now = new Date();
+
+    usersSheet.appendRow([cleanEmail, cleanName, assignedRole, salt, hash, now, now]);
+
+    if (assignedRole === "Admin") {
+      const sMap = getSettingsMap_(ss);
+      if (!sMap["Alert Emails"]) setSettingKey_(ss, "Alert Emails", cleanEmail);
+    }
+
+    const userObj = { email: cleanEmail, name: cleanName, role: assignedRole };
+    const token = issueUserSession_(userObj);
+    logAudit_(ss, cleanEmail, "REGISTER_" + assignedRole.toUpperCase(), cleanEmail, "Created " + assignedRole + " account");
+
+    return { success: true, sessionToken: token, user: userObj };
+  } catch (err) {
+    return { success: false, message: err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function loginAccount(email, password) {
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  const cleanPass = String(password || "");
+
+  const cache = CacheService.getScriptCache();
+  if (cache.get("login_lock_" + cleanEmail)) {
+    return { success: false, message: "Too many failed attempts. Try again in 5 minutes." };
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const usersSheet = ensureUsersSheet_(ss);
+  const lastRow = usersSheet.getLastRow();
+  if (lastRow < 2) {
+    return { success: false, message: "Email or password is incorrect." };
+  }
+
+  const data = usersSheet.getRange(2, 1, lastRow - 1, 5).getValues();
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim().toLowerCase() === cleanEmail) {
+      const fullName = String(data[i][1] || cleanEmail);
+      const role = String(data[i][2] || "User");
+      const salt = String(data[i][3] || "");
+      const storedHash = String(data[i][4] || "");
+
+      if (role === "Disabled") {
+        return { success: false, message: "Email or password is incorrect." };
+      }
+
+      if (sha256Hex_(salt + ":" + cleanPass) !== storedHash) {
+        const fails = Number(cache.get("login_fails_" + cleanEmail) || 0) + 1;
+        if (fails >= 5) {
+          cache.put("login_lock_" + cleanEmail, "1", 300);
+          cache.remove("login_fails_" + cleanEmail);
+          return { success: false, message: "Locked for 5 minutes after 5 failed attempts." };
+        }
+        cache.put("login_fails_" + cleanEmail, String(fails), 600);
+        return { success: false, message: "Email or password is incorrect." };
+      }
+
+      cache.remove("login_fails_" + cleanEmail);
+      usersSheet.getRange(i + 2, 7).setValue(new Date());
+
+      const userObj = { email: cleanEmail, name: fullName, role: role };
+      const token = issueUserSession_(userObj);
+      return { success: true, sessionToken: token, user: userObj };
+    }
+  }
+
+  return { success: false, message: "Email or password is incorrect." };
+}
+
+function requestPasswordReset(email) {
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  if (!cleanEmail) return { success: false, message: "Enter your account email address." };
+
+  const cache = CacheService.getScriptCache();
+  if (cache.get("rst_cool_" + cleanEmail)) {
+    return { success: false, message: "Please wait 60 seconds before requesting another reset code." };
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const usersSheet = ensureUsersSheet_(ss);
+  if (usersSheet.getLastRow() < 2) {
+    return { success: true, message: "If the account exists, a reset code will be sent shortly." };
+  }
+
+  const data = usersSheet.getRange(2, 1, usersSheet.getLastRow() - 1, 1).getValues();
+  let exists = false;
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim().toLowerCase() === cleanEmail) { exists = true; break; }
+  }
+  if (!exists) return { success: true, message: "If the account exists, a reset code will be sent shortly." };
+
+  // UUID entropy avoids Math.random for security-sensitive reset codes.
+  const randomHex = Utilities.getUuid().replace(/-/g, "").slice(0, 8);
+  const code = String(100000 + (parseInt(randomHex, 16) % 900000));
+  cache.put("rst_code_" + cleanEmail, JSON.stringify({ code: code, attempts: 0 }), 600);
+  cache.put("rst_cool_" + cleanEmail, "1", 60);
+
+  MailApp.sendEmail({
+    to: cleanEmail,
+    subject: "Fleet Tracker - Password Reset Code: " + code,
+    htmlBody: `
+      <div style="font-family:Arial,sans-serif;max-width:420px;padding:20px;border:1px solid #e5e7eb;border-radius:10px;">
+        <h3 style="margin:0 0 8px;color:#1e3a8a;">Password Reset Code</h3>
+        <p style="font-size:13px;color:#374151;">Use this 6-digit code to reset your Fleet Portal password:</p>
+        <div style="font-size:26px;font-weight:bold;letter-spacing:6px;background:#eff6ff;color:#1d4ed8;padding:12px;border-radius:8px;text-align:center;margin:14px 0;">
+          ${code}
+        </div>
+        <p style="font-size:11px;color:#6b7280;">Valid for 10 minutes.</p>
+      </div>
+    `
+  });
+
+  return { success: true, message: "6-digit reset code sent to " + cleanEmail };
+}
+
+function completePasswordReset(email, code, newPassword) {
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  const cleanCode = String(code || "").trim();
+  const cleanPass = String(newPassword || "");
+
+  if (cleanPass.length < 12) return { success: false, message: "New password must be at least 12 characters." };
+
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get("rst_code_" + cleanEmail);
+  if (!raw) return { success: false, message: "Reset code expired or not requested." };
+
+  const rec = JSON.parse(raw);
+  if (rec.code !== cleanCode) {
+    rec.attempts = (rec.attempts || 0) + 1;
+    if (rec.attempts >= 5) {
+      cache.remove("rst_code_" + cleanEmail);
+      return { success: false, message: "Too many failed attempts. Request a new code." };
+    }
+    cache.put("rst_code_" + cleanEmail, JSON.stringify(rec), 600);
+    return { success: false, message: "Invalid code (" + (5 - rec.attempts) + " attempts left)." };
+  }
+
+  cache.remove("rst_code_" + cleanEmail);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const usersSheet = ensureUsersSheet_(ss);
+  const data = usersSheet.getRange(2, 1, usersSheet.getLastRow() - 1, 5).getValues();
+
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim().toLowerCase() === cleanEmail) {
+      const salt = Utilities.getUuid().replace(/-/g, "");
+      const hash = sha256Hex_(salt + ":" + cleanPass);
+      usersSheet.getRange(i + 2, 4, 1, 2).setValues([[salt, hash]]);
+      revokeUserSessions_(cleanEmail);
+      logAudit_(ss, cleanEmail, "RESET_PASSWORD", cleanEmail, "Password reset via email OTP");
+      return { success: true, message: "Password updated! You can now sign in." };
+    }
+  }
+  return { success: false, message: "User record not found." };
+}
+
+function changePassword(sessionToken, currentPassword, newPassword) {
+  const user = verifyUserSession_(sessionToken, false);
+  if (String(newPassword || "").length < 12) {
+    return { success: false, message: "New password must be at least 12 characters." };
+  }
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const usersSheet = ensureUsersSheet_(ss);
+  const data = usersSheet.getRange(2, 1, usersSheet.getLastRow() - 1, 5).getValues();
+
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim().toLowerCase() === user.email) {
+      const salt = String(data[i][3] || "");
+      const hash = String(data[i][4] || "");
+      if (sha256Hex_(salt + ":" + String(currentPassword || "")) !== hash) {
+        return { success: false, message: "Current password is incorrect." };
+      }
+      const newSalt = Utilities.getUuid().replace(/-/g, "");
+      const newHash = sha256Hex_(newSalt + ":" + String(newPassword));
+      usersSheet.getRange(i + 2, 4, 1, 2).setValues([[newSalt, newHash]]);
+      revokeUserSessions_(user.email);
+      logAudit_(ss, user.email, "CHANGE_PASSWORD", user.email, "Changed account password");
+      return { success: true, message: "Password updated successfully." };
+    }
+  }
+  return { success: false, message: "Account not found." };
+}
+
+function updateUserRole(targetEmail, newRole, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const usersSheet = ensureUsersSheet_(ss);
+  const lastRow = usersSheet.getLastRow();
+  if (lastRow < 2) return { success: false, message: "User not found." };
+
+  const cleanTarget = String(targetEmail || "").trim().toLowerCase();
+  const validRoles = ["Admin", "User", "Disabled"];
+  if (!validRoles.includes(newRole)) return { success: false, message: "Invalid role." };
+
+  const data = usersSheet.getRange(2, 1, lastRow - 1, 3).getValues();
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][0]).trim().toLowerCase() === cleanTarget) {
+      if (cleanTarget === admin.email && newRole !== "Admin") {
+        const adminCount = data.filter(row => String(row[2]) === "Admin").length;
+        if (adminCount <= 1) return { success: false, message: "Create another administrator before changing your own role." };
+      }
+      usersSheet.getRange(i + 2, 3).setValue(newRole);
+      revokeUserSessions_(cleanTarget);
+      logAudit_(ss, admin.email, "SET_USER_ROLE", cleanTarget, "Role set to " + newRole);
+      return { success: true };
+    }
+  }
+  return { success: false, message: "User not found." };
+}
+
+/* ============================================================================
+   WEB APP ENTRYPOINTS (doGet + Dual-Transport doPost RPC)
+   ============================================================================ */
+
+function doGet(e) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const usersSheet = ensureUsersSheet_(ss);
+  const hasUsers = usersSheet.getLastRow() >= 2;
+  const execUrl = (ScriptApp.getService().getUrl() || "").replace(/\/dev$/, "/exec");
+
+  const tpl = HtmlService.createTemplateFromFile("Index");
+  tpl.bootJson = JSON.stringify({ hasUsers: hasUsers, execUrl: execUrl }).replace(/</g, "\\u003c");
+
+  // Keep Apps Script's default framing protection; do not allow arbitrary sites to embed the admin portal.
+  return tpl.evaluate().setTitle("Laptop Fleet & Admin Map");
+}
+
+function doPost(e) {
+  try {
+    const req = JSON.parse(e.postData.contents || "{}");
+    const action = req.rpcAction;
+    let result;
+
+    if (action === "registerAccount") result = registerAccount(req.email, req.fullName, req.password);
+    else if (action === "loginAccount") result = loginAccount(req.email, req.password);
+    else if (action === "logoutSession") result = logoutSession(req.sessionToken);
+    else if (action === "requestPasswordReset") result = requestPasswordReset(req.email);
+    else if (action === "completePasswordReset") result = completePasswordReset(req.email, req.code, req.newPassword);
+    else if (action === "changePassword") result = changePassword(req.sessionToken, req.currentPassword, req.newPassword);
+    else if (action === "getDashboardData") result = getDashboardData(req.sessionToken);
+    else if (action === "addManualAsset") result = addManualAsset(req.assetData, req.sessionToken);
+    else if (action === "saveOfficeBranch") result = saveOfficeBranch(req.branchId, req.name, req.lat, req.lng, req.radius, req.placeName, req.sessionToken);
+    else if (action === "deleteOfficeBranch") result = deleteOfficeBranch(req.branchId, req.sessionToken);
+    else if (action === "updateAsset") result = updateAsset(req.id, req.user, req.status, req.handoverNote, req.sessionToken);
+    else if (action === "rotateDeviceToken") result = rotateDeviceToken(req.assetId, req.sessionToken);
+    else if (action === "setDeviceTokenStatus") result = setDeviceTokenStatus(req.assetId, req.newTokenStatus, req.sessionToken);
+    else if (action === "deleteAsset") result = deleteAsset(req.id, req.sessionToken);
+    else if (action === "setAssetToBranch") result = setAssetToBranch(req.id, req.branchId, req.sessionToken);
+    else if (action === "getAssetHistory") result = getAssetHistory(req.assetId, req.sessionToken);
+    else if (action === "saveEnrollmentUrl") result = saveEnrollmentUrl(req.url, req.sessionToken);
+    else if (action === "updateSecuritySettings") result = updateSecuritySettings(req.geofenceAlerts, req.allowSelfSignup, req.allowedDomains, req.sessionToken);
+    else if (action === "sendFleetSummaryEmail") result = sendFleetSummaryEmail(req.sessionToken);
+    else if (action === "updateUserRole") result = updateUserRole(req.targetEmail, req.newRole, req.sessionToken);
+    else result = { error: "Unknown action: " + action };
+
+    return ContentService.createTextOutput(JSON.stringify({ ok: true, data: result }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: String(err && err.message ? err.message : err) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+/* ============================================================================
+   ROLE-FILTERED FLEET DATA & ADMIN ACTIONS
+   ============================================================================ */
+
+function getDashboardData(sessionToken) {
+  const user = verifyUserSession_(sessionToken, false);
+  const isAdmin = user.role === "Admin";
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  const assetsSheet = ss.getSheetByName("Assets");
+  let assets = [];
+  if (assetsSheet && assetsSheet.getLastRow() >= 2) {
+    const numRows = Math.min(assetsSheet.getLastRow() - 1, 2000);
+    const data = assetsSheet.getRange(2, 1, numRows, ASSET_HEADERS.length).getValues();
+    for (let r = 0; r < data.length; r++) {
+      const row = data[r];
+      if (String(row[0] || "").trim() === "") continue;
+
+      const assigned = String(row[1] || "").trim().toLowerCase();
+      const enrolled = String(row[15] || "").trim().toLowerCase();
+
+      if (!isAdmin && assigned !== user.email && enrolled !== user.email) {
+        continue;
+      }
+
+      const allowedColumns = isAdmin
+        ? ASSET_HEADERS.map((_, index) => index)
+        : [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 13]; // Exclude IP, serial, SSID, Windows account, enrollment email and token status.
+      const obj = {};
+      allowedColumns.forEach(c => {
+        const val = row[c];
+        obj[ASSET_HEADERS[c]] = (val instanceof Date) ? val.toISOString() : val;
+      });
+      assets.push(obj);
+    }
+  }
+
+  const officesSheet = ensureOfficesSheet_(ss);
+  const offices = [];
+  if (officesSheet.getLastRow() >= 2) {
+    const oRows = Math.min(officesSheet.getLastRow() - 1, 200);
+    const offData = officesSheet.getRange(2, 1, oRows, OFFICE_HEADERS.length).getValues();
+    for (let i = 0; i < offData.length; i++) {
+      const lat = parseFloat(offData[i][2]);
+      const lng = parseFloat(offData[i][3]);
+      if (String(offData[i][0] || "").trim() !== "" && !isNaN(lat) && !isNaN(lng)) {
+        offices.push({
+          id: String(offData[i][0]).trim(),
+          name: String(offData[i][1] || "Office"),
+          lat: lat,
+          lng: lng,
+          radius: Number(offData[i][4]) || 100,
+          place: String(offData[i][5] || "")
+        });
+      }
+    }
+  }
+
+  const audits = [];
+  const usersList = [];
+  if (isAdmin) {
+    const auditSheet = ensureAuditSheet_(ss);
+    const aLast = auditSheet.getLastRow();
+    if (aLast >= 2) {
+      const startRow = Math.max(2, aLast - 19);
+      const count = aLast - startRow + 1;
+      const auditData = auditSheet.getRange(startRow, 1, count, AUDIT_HEADERS.length).getValues();
+      for (let i = auditData.length - 1; i >= 0; i--) {
+        audits.push({
+          timestamp: auditData[i][0] instanceof Date ? auditData[i][0].toISOString() : String(auditData[i][0]),
+          admin: String(auditData[i][1] || ""),
+          action: String(auditData[i][2] || ""),
+          target: String(auditData[i][3] || ""),
+          details: String(auditData[i][4] || "")
+        });
+      }
+    }
+
+    const usersSheet = ensureUsersSheet_(ss);
+    if (usersSheet.getLastRow() >= 2) {
+      const uData = usersSheet.getRange(2, 1, usersSheet.getLastRow() - 1, 3).getValues();
+      for (let i = 0; i < uData.length; i++) {
+        usersList.push({
+          email: String(uData[i][0] || ""),
+          name: String(uData[i][1] || ""),
+          role: String(uData[i][2] || "User")
+        });
+      }
+    }
+  }
+
+  const settingsMap = getSettingsMap_(ss);
+
+  return {
+    user: user,
+    assets: assets,
+    offices: offices,
+    audits: audits,
+    usersList: usersList,
+    enrolUrl: String(settingsMap["Enrollment URL"] || "").trim(),
+    geofenceAlerts: String(settingsMap["Geofence Alerts"] || "ON").toUpperCase() === "ON",
+    allowSelfSignup: String(settingsMap["Allow Self Signup"] || "ON").toUpperCase() === "ON",
+    allowedDomains: String(settingsMap["Allowed Domains"] || "").trim()
+  };
+}
+
+function addManualAsset(assetData, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const id = sanitizeCell_(assetData.id || "");
+    if (!id) return { success: false, message: "Asset ID is required." };
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Assets");
+    if (sheet.getLastRow() >= 2) {
+      const existing = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+      for (let i = 0; i < existing.length; i++) {
+        if (String(existing[i][0]).trim().toLowerCase() === id.toLowerCase()) {
+          return { success: false, message: "Asset ID already exists." };
+        }
+      }
+    }
+
+    const user = sanitizeCell_(assetData.user || "Unassigned") || "Unassigned";
+    const serial = sanitizeCell_(assetData.serial || "");
+    const model = sanitizeCell_(assetData.model || "");
+    const now = new Date();
+
+    sheet.appendRow([
+      id, user, "Active", "", "", "", now, "Pre-Registered", "", "", serial, model, "", "", "", "", "Pending Enrolment"
+    ]);
+
+    logAudit_(ss, admin.email, "PRE_REGISTER", id, `Assigned: ${user}, Model: ${model}`);
+    return { success: true, message: "Laptop pre-registered." };
+  } catch (err) {
+    return { success: false, message: err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function saveEnrollmentUrl(url, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const cleanUrl = String(url || "").trim();
+  if (!cleanUrl.startsWith("https://script.google.com/")) {
+    return { success: false, message: "Please paste a valid https://script.google.com/... Web App URL." };
+  }
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  setSettingKey_(ss, "Enrollment URL", cleanUrl);
+  logAudit_(ss, admin.email, "LINK_PORTAL", "Project B", "Updated Enrollment Portal URL");
+  return { success: true, enrolUrl: cleanUrl };
+}
+
+function updateSecuritySettings(geofenceAlerts, allowSelfSignup, allowedDomains, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  setSettingKey_(ss, "Geofence Alerts", geofenceAlerts ? "ON" : "OFF");
+  setSettingKey_(ss, "Allow Self Signup", allowSelfSignup ? "ON" : "OFF");
+  setSettingKey_(ss, "Allowed Domains", sanitizeCell_(allowedDomains || ""));
+  logAudit_(ss, admin.email, "SECURITY_POLICY", "Settings", `Alerts=${geofenceAlerts ? "ON" : "OFF"}, SelfSignup=${allowSelfSignup ? "ON" : "OFF"}`);
+  return { success: true };
+}
+
+function saveOfficeBranch(branchId, name, lat, lng, radius, placeName, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const parsedLat = parseFloat(lat);
+    const parsedLng = parseFloat(lng);
+    const parsedRadius = parseInt(radius, 10) || 100;
+    if (isNaN(parsedLat) || isNaN(parsedLng)) {
+      return { success: false, message: "Invalid coordinates." };
+    }
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ensureOfficesSheet_(ss);
+    const cleanName = sanitizeCell_(name || "Main Office");
+    const cleanPlace = sanitizeCell_(placeName || "");
+    const id = branchId ? String(branchId).trim() : "BR-" + Utilities.getUuid().slice(0, 6).toUpperCase();
+
+    const lastRow = sheet.getLastRow();
+    let updated = false;
+    if (lastRow >= 2) {
+      const data = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+      for (let i = 0; i < data.length; i++) {
+        if (String(data[i][0]).trim() === id) {
+          sheet.getRange(i + 2, 2, 1, 5).setValues([[cleanName, parsedLat, parsedLng, parsedRadius, cleanPlace]]);
+          updated = true;
+          break;
+        }
+      }
+    }
+
+    if (!updated) {
+      sheet.appendRow([id, cleanName, parsedLat, parsedLng, parsedRadius, cleanPlace]);
+    }
+
+    logAudit_(ss, admin.email, updated ? "UPDATE_OFFICE" : "ADD_OFFICE", cleanName, `${parsedLat}, ${parsedLng} (${parsedRadius}m)`);
+
+    return {
+      success: true,
+      branch: { id: id, name: cleanName, lat: parsedLat, lng: parsedLng, radius: parsedRadius, place: cleanPlace }
+    };
+  } catch (err) {
+    return { success: false, message: err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteOfficeBranch(branchId, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ensureOfficesSheet_(ss);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return { success: false, message: "Branch not found." };
+
+    const data = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+    for (let i = data.length - 1; i >= 0; i--) {
+      if (String(data[i][0]).trim() === String(branchId).trim()) {
+        const bName = data[i][1];
+        sheet.deleteRow(i + 2);
+        logAudit_(ss, admin.email, "DELETE_OFFICE", bName, "Removed branch " + branchId);
+        return { success: true };
+      }
+    }
+    return { success: false, message: "Branch not found." };
+  } catch (err) {
+    return { success: false, message: err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function updateAsset(id, user, status, handoverNote, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("Assets");
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return { success: false, message: "Asset ID not found." };
+
+    const data = sheet.getRange(2, 1, lastRow - 1, 3).getValues();
+    const targetId = String(id).trim();
+
+    for (let i = 0; i < data.length; i++) {
+      if (String(data[i][0]).trim() === targetId) {
+        const oldUser = data[i][1];
+        const oldStatus = data[i][2];
+        const cleanUser = sanitizeCell_(user);
+        const cleanStatus = sanitizeCell_(status);
+        sheet.getRange(i + 2, 2, 1, 2).setValues([[cleanUser, cleanStatus]]);
+
+        const noteStr = handoverNote ? ` | Note: ${handoverNote}` : "";
+        logAudit_(ss, admin.email, "UPDATE_ASSET", targetId, `User: ${oldUser} -> ${cleanUser}, Status: ${oldStatus} -> ${cleanStatus}${noteStr}`);
+        return { success: true, message: "Asset updated." };
+      }
+    }
+    return { success: false, message: "Asset ID not found." };
+  } catch (err) {
+    return { success: false, message: err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function rotateDeviceToken(assetId, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const targetId = String(assetId).trim();
+    const newRawToken = Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
+    const newHash = sha256Hex_(newRawToken);
+    const now = new Date();
+
+    const devSheet = ss.getSheetByName("Authorized_Devices");
+    let enrolledEmail = "";
+    let found = false;
+
+    if (devSheet && devSheet.getLastRow() >= 2) {
+      const dData = devSheet.getRange(2, 1, devSheet.getLastRow() - 1, 3).getValues();
+      for (let i = 0; i < dData.length; i++) {
+        if (String(dData[i][0]).trim().toLowerCase() === targetId.toLowerCase()) {
+          enrolledEmail = String(dData[i][2] || "");
+          devSheet.getRange(i + 2, 2, 1, 4).setValues([[newHash, enrolledEmail, "Active", now]]);
+          found = true;
+          break;
+        }
+      }
+    }
+
+    if (!found && devSheet) {
+      devSheet.appendRow([targetId, newHash, "", "Active", now, now]);
+    }
+
+    const assetsSheet = ss.getSheetByName("Assets");
+    if (assetsSheet && assetsSheet.getLastRow() >= 2) {
+      const aData = assetsSheet.getRange(2, 1, assetsSheet.getLastRow() - 1, 1).getValues();
+      for (let i = 0; i < aData.length; i++) {
+        if (String(aData[i][0]).trim().toLowerCase() === targetId.toLowerCase()) {
+          assetsSheet.getRange(i + 2, 17).setValue("Active");
+        }
+      }
+    }
+
+    logAudit_(ss, admin.email, "ROTATE_TOKEN", targetId, "Issued new device token");
+    return { success: true, assetId: targetId, deviceToken: newRawToken };
+  } catch (err) {
+    return { success: false, message: err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function setDeviceTokenStatus(assetId, newTokenStatus, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const targetId = String(assetId).trim().toLowerCase();
+    const statusVal = newTokenStatus === "Active" ? "Active" : "Revoked";
+
+    const devSheet = ss.getSheetByName("Authorized_Devices");
+    if (devSheet && devSheet.getLastRow() >= 2) {
+      const dData = devSheet.getRange(2, 1, devSheet.getLastRow() - 1, 1).getValues();
+      for (let i = 0; i < dData.length; i++) {
+        if (String(dData[i][0]).trim().toLowerCase() === targetId) {
+          devSheet.getRange(i + 2, 4).setValue(statusVal);
+        }
+      }
+    }
+
+    const assetsSheet = ss.getSheetByName("Assets");
+    if (assetsSheet && assetsSheet.getLastRow() >= 2) {
+      const aData = assetsSheet.getRange(2, 1, assetsSheet.getLastRow() - 1, 1).getValues();
+      for (let i = 0; i < aData.length; i++) {
+        if (String(aData[i][0]).trim().toLowerCase() === targetId) {
+          assetsSheet.getRange(i + 2, 17).setValue(statusVal);
+        }
+      }
+    }
+
+    logAudit_(ss, admin.email, "TOKEN_" + statusVal.toUpperCase(), assetId, "Token status changed to " + statusVal);
+    return { success: true, tokenStatus: statusVal };
+  } catch (err) {
+    return { success: false, message: err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteAsset(id, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const targetId = String(id).trim().toLowerCase();
+
+    const sheet = ss.getSheetByName("Assets");
+    if (sheet && sheet.getLastRow() >= 2) {
+      const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+      for (let i = data.length - 1; i >= 0; i--) {
+        if (String(data[i][0]).trim().toLowerCase() === targetId) {
+          sheet.deleteRow(i + 2);
+        }
+      }
+    }
+
+    const devSheet = ss.getSheetByName("Authorized_Devices");
+    if (devSheet && devSheet.getLastRow() >= 2) {
+      const dData = devSheet.getRange(2, 1, devSheet.getLastRow() - 1, 1).getValues();
+      for (let i = dData.length - 1; i >= 0; i--) {
+        if (String(dData[i][0]).trim().toLowerCase() === targetId) {
+          devSheet.deleteRow(i + 2);
+        }
+      }
+    }
+
+    logAudit_(ss, admin.email, "DELETE_ASSET", id, "Removed asset and purged token");
+    return { success: true, message: "Asset deleted and token purged." };
+  } catch (err) {
+    return { success: false, message: err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function setAssetToBranch(id, branchId, sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const officesSheet = ensureOfficesSheet_(ss);
+    if (officesSheet.getLastRow() < 2) return { success: false, message: "Add an Office branch first." };
+
+    const oData = officesSheet.getRange(2, 1, officesSheet.getLastRow() - 1, OFFICE_HEADERS.length).getValues();
+    let targetBranch = null;
+
+    for (let i = 0; i < oData.length; i++) {
+      if (!branchId || String(oData[i][0]).trim() === String(branchId).trim()) {
+        targetBranch = {
+          name: String(oData[i][1] || "Office"),
+          lat: parseFloat(oData[i][2]),
+          lng: parseFloat(oData[i][3]),
+          place: String(oData[i][5] || "")
+        };
+        break;
+      }
+    }
+
+    if (!targetBranch || isNaN(targetBranch.lat) || isNaN(targetBranch.lng)) {
+      return { success: false, message: "Add an Office branch first." };
+    }
+
+    const assetsSheet = ss.getSheetByName("Assets");
+    const historySheet = ss.getSheetByName("History");
+    const data = assetsSheet.getRange(2, 1, assetsSheet.getLastRow() - 1, ASSET_HEADERS.length).getValues();
+    const targetId = String(id).trim();
+    const timestamp = new Date();
+
+    for (let i = 0; i < data.length; i++) {
+      if (String(data[i][0]).trim() === targetId) {
+        const ip = data[i][9] || "";
+        const ssid = data[i][12] || "";
+        const battery = data[i][13] !== undefined ? data[i][13] : "";
+        const methodLabel = "Manual (" + targetBranch.name + ")";
+
+        assetsSheet.getRange(i + 2, 4, 1, 6).setValues([[
+          targetBranch.lat, targetBranch.lng, targetBranch.place, timestamp, methodLabel, 5
+        ]]);
+        historySheet.appendRow([timestamp, targetId, targetBranch.lat, targetBranch.lng, targetBranch.place, methodLabel, 5, ip, ssid, battery]);
+
+        logAudit_(ss, admin.email, "MOVE_TO_OFFICE", targetId, "Moved to " + targetBranch.name);
+        return { success: true };
+      }
+    }
+    return { success: false, message: "Asset ID not found." };
+  } catch (err) {
+    return { success: false, message: err.message };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getAssetHistory(assetId, sessionToken) {
+  const user = verifyUserSession_(sessionToken, false);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  if (user.role !== "Admin") {
+    const aSheet = ss.getSheetByName("Assets");
+    let allowed = false;
+    if (aSheet && aSheet.getLastRow() >= 2) {
+      const aData = aSheet.getRange(2, 1, aSheet.getLastRow() - 1, ASSET_HEADERS.length).getValues();
+      for (let i = 0; i < aData.length; i++) {
+        if (String(aData[i][0]).trim().toLowerCase() === String(assetId).trim().toLowerCase()) {
+          if (String(aData[i][1]).trim().toLowerCase() === user.email || String(aData[i][15]).trim().toLowerCase() === user.email) {
+            allowed = true;
+          }
+          break;
+        }
+      }
+    }
+    if (!allowed) throw new Error("Access denied to this device trail.");
+  }
+
+  const historySheet = ss.getSheetByName("History");
+  if (!historySheet || historySheet.getLastRow() < 2) return [];
+
+  const targetId = String(assetId || "").trim().toLowerCase();
+  const lastRow = historySheet.getLastRow();
+  const startRow = Math.max(2, lastRow - 999);
+  const data = historySheet.getRange(startRow, 1, lastRow - startRow + 1, HISTORY_HEADERS.length).getValues();
+
+  const trail = [];
+  for (let i = 0; i < data.length; i++) {
+    if (String(data[i][1]).trim().toLowerCase() === targetId) {
+      const lat = parseFloat(data[i][2]);
+      const lng = parseFloat(data[i][3]);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        trail.push({
+          timestamp: data[i][0] instanceof Date ? data[i][0].toISOString() : String(data[i][0]),
+          lat: lat,
+          lng: lng,
+          placeName: data[i][4] || "",
+          method: data[i][5] || "Unknown",
+          accuracy: data[i][6] || ""
+        });
+      }
+    }
+  }
+  return trail.slice(-50);
+}
+
+function sendFleetSummaryEmail(sessionToken) {
+  const admin = verifyUserSession_(sessionToken, true);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const settingsMap = getSettingsMap_(ss);
+  const recipients = String(settingsMap["Alert Emails"] || admin.email).trim();
+
+  if (!recipients) return { success: false, message: "No Alert Emails configured." };
+
+  const dash = getDashboardData(sessionToken);
+  const total = dash.assets.length;
+  const stolen = dash.assets.filter(a => a.Status === "Stolen");
+  const repair = dash.assets.filter(a => a.Status === "In Repair");
+  const lowBatt = dash.assets.filter(a => a["Battery (%)"] !== "" && Number(a["Battery (%)"]) < 20);
+  const stale = dash.assets.filter(a => {
+    if (!a["Last Updated"]) return false;
+    return (Date.now() - new Date(a["Last Updated"]).getTime()) / 86400000 > 14;
+  });
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:560px;padding:20px;border:1px solid #e5e7eb;border-radius:10px;">
+      <h2 style="margin:0 0 8px;color:#1e3a8a;">Laptop Fleet Health Summary</h2>
+      <p style="color:#6b7280;font-size:12px;">Generated on ${new Date().toLocaleString()} by ${admin.email}</p>
+      <table style="width:100%;border-collapse:collapse;margin:14px 0;font-size:13px;">
+        <tr><td style="padding:8px;border:1px solid #e5e7eb;"><b>Total Registered Laptops</b></td><td style="padding:8px;border:1px solid #e5e7eb;">${total}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #e5e7eb;color:#dc2626;"><b>Stolen / Missing</b></td><td style="padding:8px;border:1px solid #e5e7eb;">${stolen.length}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #e5e7eb;color:#d97706;"><b>Stale (&gt;14 Days Offline)</b></td><td style="padding:8px;border:1px solid #e5e7eb;">${stale.length}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #e5e7eb;"><b>In Repair</b></td><td style="padding:8px;border:1px solid #e5e7eb;">${repair.length}</td></tr>
+        <tr><td style="padding:8px;border:1px solid #e5e7eb;"><b>Low Battery (&lt;20%)</b></td><td style="padding:8px;border:1px solid #e5e7eb;">${lowBatt.length}</td></tr>
+      </table>
+      ${stolen.length ? `<p style="color:#dc2626;font-size:13px;"><b>Stolen Devices:</b> ${stolen.map(s => `${s["Asset ID"]} (${s["Place Name"] || s.Lat + "," + s.Lng})`).join("; ")}</p>` : ""}
+    </div>
+  `;
+
+  MailApp.sendEmail({
+    to: recipients,
+    subject: `Laptop Fleet Summary (${total} Assets, ${stolen.length} Stolen, ${stale.length} Stale)`,
+    htmlBody: html
+  });
+
+  logAudit_(ss, admin.email, "EMAIL_REPORT", recipients, "Sent Fleet Health Summary");
+  return { success: true, message: "Fleet summary emailed to " + recipients };
+}
